@@ -1,0 +1,3 @@
+$ git status
+On branch main
+Run npm install to update lockfile? (y/n)

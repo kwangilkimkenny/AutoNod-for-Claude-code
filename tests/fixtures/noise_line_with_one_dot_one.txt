@@ -1,0 +1,4 @@
+$ npm test
+Test results:
+Note: 1. Install dependencies before running
+All checks complete.

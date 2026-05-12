@@ -1,0 +1,5 @@
+Allow Bash command for this session?
+  1. Yes
+  2. Yes, and don't ask again for npm
+  3. No, with feedback
+(recommended)

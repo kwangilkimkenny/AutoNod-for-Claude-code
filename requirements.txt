@@ -1,0 +1,15 @@
+# Core runtime
+mss>=9.0
+pyautogui>=0.9.54
+Pillow>=10.0
+requests>=2.31
+
+# macOS Vision OCR + window discovery (Quartz)
+pyobjc-framework-Quartz>=10.0
+pyobjc-framework-Vision>=10.0
+pyobjc-framework-Foundation>=10.0
+
+# Optional — only required when using --ocr-engine paddle.
+# Uncomment to install. Heavy and slow on Apple Silicon.
+# paddleocr>=2.7
+# paddlepaddle>=2.6
