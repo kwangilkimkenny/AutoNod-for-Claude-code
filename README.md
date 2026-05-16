@@ -1,176 +1,226 @@
 # AutoNod
 
-An agent that reads the screen via OCR on macOS and automatically responds to **Claude Code permission prompts** inside VS Code.
+Auto-press **Enter** (or `1`, `y`, …) on **Claude Code permission prompts** running inside tmux. Watches as many panes as you want, in parallel, safely.
 
-- **Cheap, fast decisions first**: macOS Vision OCR (~0.3s) + rule-based decider. Falls back to a local LLM only when ambiguous.
-- **Safety guards**: same frame stable twice + 15s cooldown after handling + destructive keyword blocking + free-text input avoidance.
-- **Window lock**: at startup, click once with the mouse to designate the single VS Code window to operate on.
-
-## Quick start
-
-### 1. Prerequisites (one-time)
-
-```bash
-# Python dependencies
-.venv/bin/pip install -r requirements.txt
-
-# Local LLM (Ollama)
-brew install ollama
-ollama serve &
-ollama pull qwen3
+```
+$ autonod attach -t work
+INFO  watching pane pane=%0 target=work:0.0 cmd=claude
+INFO  watching pane pane=%1 target=work:1.0 cmd=claude
+INFO  decision pane=%0 action=1 confidence=0.85 source=rule reason=safe single-shot Yes on key "1"
+INFO  decision pane=%1 action=2 confidence=0.95 source=rule reason=option "2" marked recommended
 ```
 
-macOS permissions — open System Settings → Privacy & Security, add your current terminal (Terminal/iTerm) to **both** **Screen Recording** and **Accessibility**, then **fully quit and relaunch the terminal**.
+- **Zero macOS permissions.** No Screen Recording, no Accessibility, no Input Monitoring.
+- **Always the right pane.** `tmux send-keys -t <pane_id>` is exact — no wrong-window misfires.
+- **Safe by default.** Same prompt must appear twice + 15-second cooldown + destructive-keyword blocklist (`delete`, `rm -rf`, `force push`, …) always abstains.
+- **Cheap.** Rule decider handles the common Claude Code prompts without any LLM call. Falls back to a local Ollama model only when ambiguous.
 
-### 2. Verify — confirm the capture region once (no keys pressed)
+> **Two versions in this repo.** `v0.2` (Rust + tmux — described here) and the legacy `v0.1` (macOS OCR + Python — see [legacy section](#legacy-v01--macos-ocr--python)). New users should pick v0.2.
 
-```bash
-.venv/bin/python agent.py --smart --dry-run --once \
-  --pick-by-click --app Code --crop 0.2,0.7,1,0.97 \
-  --smart-stable-frames 1 --save-shot /tmp/shot.png
-```
+---
 
-After running, **click the VS Code window you want to operate within 30 seconds** to lock it.
+## 5-minute quick start
 
-Two things to check:
-```bash
-open /tmp/shot.png                       # visually confirm only the terminal panel was cropped
-.venv/bin/python ocr.py /tmp/shot.png    # confirm OCR read the prompt line
-```
-
-If `/tmp/shot.png` is off, adjust the `--crop` ratios (see [Tuning the capture region](#tuning-the-capture-region) below).
-
-### 3. Repeated dry-run — false-positive regression check
+### 1. Install
 
 ```bash
-.venv/bin/python agent.py --smart --dry-run \
-  --pick-by-click --app Code --crop 0.2,0.7,1,0.97 --interval 2
+# tmux (one-time)
+brew install tmux
+
+# autonod
+git clone https://github.com/kwangilkimkenny/AutoNod-for-Claude-code.git
+cd AutoNod-for-Claude-code
+cargo install --path .                    # installs to ~/.cargo/bin/autonod
 ```
 
-On normal screens with no prompt, you should only see `smart kind=none` repeating. If a spurious `action='1'` appears, the region contains text that looks like an option — narrow `--crop`.
-
-### 4. Real operation — keys are actually pressed
+### 2. Run Claude Code inside tmux
 
 ```bash
-.venv/bin/python agent.py --smart \
-  --pick-by-click --app Code --crop 0.2,0.7,1,0.97 --interval 2
+tmux new -s work       # start a tmux session named "work"
+# inside that pane, start whatever CLI you want autonod to babysit:
+claude                 # or: aider, gemini, etc.
 ```
 
-**Emergency stop**: move the mouse to the top-left corner of the screen → pyautogui FAILSAFE exits immediately. Or `Ctrl+C` in the terminal.
+You can split the window or open more tmux windows — each pane running Claude is one autonod target.
+
+### 3. Watch in dry-run first
+
+In a **separate** terminal:
+
+```bash
+autonod list                                          # what does tmux see?
+autonod attach -t work --dry-run --interval 2        # log only, no keys pressed
+```
+
+Use Claude Code as you normally would. autonod will log what it *would* press without actually pressing.
+
+### 4. Once you trust it, drop --dry-run
+
+```bash
+autonod attach -t work --interval 2                  # real keypresses
+```
+
+Stop with `Ctrl+C`. Need to watch every session at once?
+
+```bash
+autonod attach                                       # all panes the tmux server can see
+```
+
+That's it. The rest of this README is reference material.
+
+---
+
+## Recipes
+
+```bash
+# Watch one specific pane by id
+autonod attach -t %3
+
+# Watch every pane in a session
+autonod attach -t work
+
+# Watch a single pane: session:window.pane
+autonod attach -t work:1.0
+
+# Watch several at once (flag is repeatable)
+autonod attach -t work -t experiments -t %9
+
+# More conservative — wait for 3 stable frames before pressing
+autonod attach -t work --stable-frames 3 --interval 1
+
+# Inject CLAUDE.md as context for the LLM fallback
+autonod attach -t work --project-context CLAUDE.md
+```
+
+### Debug helpers
+
+```bash
+autonod list                              # panes the tmux server reports
+autonod decide-once work:0.0              # one capture + decision dump (JSON)
+autonod test-parser path/to/screen.txt    # parse a saved screen
+autonod -v attach -t work --dry-run       # debug-level logs
+```
+
+### Self-verification before trusting it on real work
+
+A bundled regression suite paints 9 fake Claude Code prompts into a throwaway tmux session and asserts the decisions match. Run it any time:
+
+```bash
+cargo build --release
+bash tests/smoke_tmux.sh
+# expected: 9 scenarios, 9 pass, 0 fail, ALL PASS
+```
+
+For real-world confidence before unattended use, run `autonod attach -t <your-session> --dry-run` against a real Claude session for ~30 minutes of normal coding. If the log shows zero `action=…` lines for screens that *weren't* live prompts, you're safe to drop `--dry-run`.
+
+---
+
+## Flags (`autonod attach`)
+
+| Flag                | Default                              | Description                                                           |
+| ------------------- | ------------------------------------ | --------------------------------------------------------------------- |
+| `-t, --target`      | (all panes)                          | pane id (`%23`), `session:win.pane`, or session name. Repeatable.     |
+| `--dry-run`         | off                                  | log decisions, do not press keys                                      |
+| `--interval`        | `2.0`                                | poll period in seconds                                                |
+| `--scrollback`      | `50`                                 | history lines included in each snapshot                               |
+| `--stable-frames`   | `2`                                  | identical frames required before acting (anti-flicker)                |
+| `--cooldown-sec`    | `15`                                 | seconds to block re-action on the same prompt hash                    |
+| `--llm-model`       | `qwen3:latest`                       | Ollama model for the ambiguous-case fallback                          |
+| `--llm-timeout`     | `30`                                 | LLM HTTP timeout (seconds)                                            |
+| `--confidence`      | `0.7`                                | LLM confidence threshold                                              |
+| `--project-context` | (none)                               | file (e.g. `CLAUDE.md`) injected into the LLM context                 |
+| `--llm-endpoint`    | `http://localhost:11434/api/chat`    | override Ollama URL                                                   |
+
+Global: `-v` once → debug logs, `-vv` → trace. `RUST_LOG=autonod=debug` works too.
+
+---
 
 ## How it works
 
+Every `--interval` seconds, for each watched pane:
+
 ```
-every 1–2 seconds ──┐
-                    ▼
-[Capture] mss captures only the designated region of the locked VS Code window
-                    ▼
-[OCR] macOS Vision (~0.3s). Sorted by boundingBox, fragments on the same row are joined.
-                    ▼
-[Parser] '1. Yes', '(recommended)', '(y/n)', etc. → PromptFrame
-                    ▼
-[Stability gate] same frame twice in a row + 15s cooldown
-                    ▼
-[Rule decider] (a) single recommended marker (b) cursor on Yes
-               (c) exactly Yes/No 2-choice → immediate key decision
-                    ▼
-[LLM decider] qwen3:latest returns JSON within 30s. If confidence<0.7, 'none'.
-                    ▼
-[Key press] one of 1/2/3/y/n/enter via pyautogui
+ capture-pane ─► parse ─► state gate ─► rule decider ─► (LLM if ambiguous) ─► send-keys
 ```
 
-Free-text input prompts (only `?`, no options) or destructive keywords (`delete`, `rm -rf`, `force push`, `--no-verify`, `reset --hard`, …) are always handed off to a human.
+1. **Capture.** `tmux capture-pane -p -J` grabs the visible screen plus `--scrollback` history.
+2. **Parse.** Scans bottom-up for an option block (`1. Yes`, `❯ 1. Yes`, `(y/N)`) and the nearest preceding `?` line. Output: `PromptFrame { kind, question, options[], cursor_idx, destructive }`.
+3. **Stability gate.** Requires `--stable-frames` (default 2) consecutive identical frames before letting any decision through. Suppresses re-action on the same hash for `--cooldown-sec` (default 15s).
+4. **Rule decider** acts immediately when one of these is true:
+   - exactly one option marked `(recommended)` / `(default)` → that key (confidence 0.95)
+   - `❯` cursor sits on a Yes / Allow / OK / Continue option → that key (0.85)
+   - exactly two options with canonical Yes / No labels → `1` (0.85)
+   - inline `(y/N)` shorthand → `y` (0.85)
+5. **LLM fallback** (Ollama `qwen3:latest`) for ambiguous prompts — strict JSON `{action, confidence, reason}`, temperature 0. Below `--confidence` → `none`.
+6. **Safety**: questions containing `delete`, `rm -rf`, `force push`, `--no-verify`, `reset --hard`, `overwrite`, `discard`, `wipe`, `destroy` always return `none`. Free-text prompts (no options) always return `none`.
+7. **Action**: chosen key (one of `1`–`5`, `y`, `n`, `a`, `enter`) is sent via `tmux send-keys -t <pane_id>`, followed by `Enter`.
 
-For design details, see [`DESIGN.md`](DESIGN.md).
+The full design — including data structures and parser heuristics — is in [`DESIGN.md`](DESIGN.md).
 
-## Key flags
-
-| Flag | Default | Description |
-|---|---|---|
-| `--smart` | off | enable tiered decider (mutually exclusive with `--ocr`/`--blind`) |
-| `--dry-run` | off | log decisions only, do not press keys |
-| `--once` | off | exit after a single cycle |
-| `--pick-by-click` | off | lock the target window via mouse click at startup |
-| `--pick-timeout` | `30` | seconds to wait for the click above |
-| `--app NAME` | (none) | partial match on window owner (VS Code = `Code`) |
-| `--crop l,t,r,b` | (none) | capture region. All values in [0,1] = ratios; otherwise pixels |
-| `--interval` | `5.0` | loop interval (seconds). `2` recommended for Smart |
-| `--smart-stable-frames` | `2` | N consecutive identical frames required before deciding |
-| `--smart-cooldown-sec` | `15` | seconds to block re-pressing for the same prompt |
-| `--smart-llm-model` | `qwen3:latest` | Ollama text model |
-| `--smart-llm-timeout` | `30` | LLM HTTP timeout (seconds) |
-| `--smart-confidence` | `0.7` | LLM confidence threshold |
-| `--smart-verify` | off | fall back to VLM (`--model`) only when OCR returns 0 lines |
-| `--project-context` | (none) | file to include in the LLM context (e.g. `CLAUDE.md`) |
-| `--save-shot PATH` | (none) | save the captured PNG (debug) |
-
-For all options, run `.venv/bin/python agent.py --help`.
-
-## Tuning the capture region
-
-`--crop` supports two notations.
-
-- **Ratio** (`l,t,r,b` — all 0–1): left, top, right, bottom ratios within the window. e.g. `0.2,0.7,1,0.97` = "from 20% left, from 70% top, with a 3% margin from the bottom-right".
-- **Pixel** (`x,y,w,h`): pixel coordinates relative to the top-left of the window.
-
-Recommended: capture once with `--save-shot /tmp/shot.png`, inspect via `open /tmp/shot.png`, and adjust the ratios by however much it's off. In VS Code, excluding the left sidebar + status bar tends to crop the terminal panel cleanly.
-
-## Reading the logs
-
-| Log | Meaning |
-|---|---|
-| `smart kind=none` | no prompt (normal) |
-| `smart hash=… gate=need 2 stable frames (have 1)` | 1st frame, waiting for the next cycle (normal) |
-| `kind=choice action='1' [rule c=0.85] safe single-shot Yes …` | rule path decided immediately |
-| `[rule c=0.95] option 'N' marked recommended` | decided via the (recommended) marker |
-| `[llm c=0.82] …` | decided after an LLM call |
-| `[fallback …] llm error: …` | Ollama down / model not installed → handed off to a human |
-| `[rule c=1.00] destructive keyword detected` | destructive keyword blocked |
-| `gate=cooldown (12.4s left)` | prompt just handled, re-press blocked (normal) |
+---
 
 ## Troubleshooting
 
-| Symptom | Action |
-|---|---|
-| `no window found for app='Visual Studio Code'` | the owner name is `Code`. Use `--app Code` or check via `--list-windows` |
-| Capture is black | Screen Recording permission missing → add the terminal and fully relaunch it |
-| Keys don't press | Accessibility permission missing → same action |
-| `connection refused` | check that `ollama serve` is running |
-| `model not found: qwen3:latest` | `ollama pull qwen3`, or use `--smart-llm-model llama3.2` etc. |
-| Spurious `action='1'` on normal screens | narrow `--crop` to exclude the sidebar/status bar |
-| Click selects the wrong window | drop `--app` or specify it differently. Or use `--pick-window --gui` for the GUI picker |
-| Captures the wrong area after moving the window | restart the agent (window coordinates are measured once at startup) |
+| Symptom                                       | Action                                                                 |
+| --------------------------------------------- | ---------------------------------------------------------------------- |
+| `no running tmux server`                      | Start one: `tmux new -s work`                                           |
+| `autonod list` shows nothing                  | You're inside the tmux pane — `list` looks at the *server*. Open another terminal. |
+| `tmux send-keys ... failed`                   | Pane closed mid-run. Restart the attach.                              |
+| `llm error: connection refused`               | Ollama isn't running. `ollama serve &` and `ollama pull qwen3`. Or rely on the rule path. |
+| Wrong key gets sent for a custom prompt       | Run `autonod decide-once <target>` and read the parser output. Open an issue with the screen dump. |
+| Reaction is too aggressive                    | `--stable-frames 3 --interval 2` is calmer.                            |
+| Reaction is too slow                          | `--interval 1` polls twice as fast (still rule-only when possible).    |
 
-## Tests
+---
 
-```bash
-.venv/bin/python -m pytest tests/ -q   # 38 passed
-```
-
-## Appendix: simple OCR / VLM modes
-
-For when you want to auto-respond to a single pattern without Smart mode.
+## Build, test, hack
 
 ```bash
-# regex match on one line (~0.5s, no hallucinations)
-.venv/bin/python agent.py --ocr \
-  --app Code --crop 0.2,0.7,1,0.97 --interval 1
-# default pattern: ^[❯>]\s*1\.\s*Yes\b
-
-# custom regex
-.venv/bin/python agent.py --ocr --ocr-pattern '\([Yy]/[Nn]\)' ...
-
-# vision LLM (slow, for visual reasoning)
-ollama pull qwen2.5vl:7b
-.venv/bin/python agent.py --model qwen2.5vl:7b \
-  --prompt-file prompts/yes_to_proceed.txt \
-  --app Code --crop 0.2,0.7,1,0.97 --interval 8
+cargo build --release           # ~30s clean build
+cargo test                      # 27 unit tests (parser, state, decider, llm)
+cargo clippy --all-targets      # zero warnings expected
+bash tests/smoke_tmux.sh        # 9 end-to-end scenarios in a real tmux server
 ```
 
-`--smart`, `--ocr`, and `--blind` cannot be enabled simultaneously (mutually exclusive).
+Crate layout:
 
-## Limitations / caveats
+```
+src/
+├── lib.rs       module exports
+├── main.rs      CLI (list / attach / decide-once / test-parser)
+├── parser.rs    PromptFrame parser  (port of parser.py)
+├── state.rs     stability gate + cooldown
+├── decider.rs   rule decisions
+├── llm.rs       Ollama HTTP client
+├── tmux.rs      list-panes / capture-pane / send-keys wrappers
+└── pane.rs      per-pane polling loop
+```
 
-- In multi-monitor setups, moving the window shifts the coordinates → restart.
-- Because it sends global key input, clicking another window during operation may send the keys there. `--pick-by-click` locks the window coordinates at startup, but does not force focus to stay (`press()` attempts a click+focus right before the keystroke, but it's not 100% safe).
-- Recommended to shut it down when you step away. It's an automation tool, not an unattended system.
+---
+
+## Legacy: v0.1 — macOS OCR + Python
+
+The original implementation reads VS Code's terminal panel via macOS Vision OCR and presses keys with pyautogui. It still works, and remains in the repo for users on VS Code who don't want to move their workflow into tmux. Its main limitations — wrong-window key delivery, OCR misreads on small fonts, macOS permission overhead — were the reason for the v0.2 rewrite.
+
+To use v0.1:
+
+```bash
+.venv/bin/pip install -r requirements.txt
+ollama serve & ollama pull qwen3
+.venv/bin/python agent.py --smart --pick-window --gui --app Code --crop 0.2,0.7,1,0.97 --interval 2
+```
+
+Detailed setup and design notes are kept under tag [`v0.1.0`](https://github.com/kwangilkimkenny/AutoNod-for-Claude-code/releases/tag/v0.1.0).
+
+---
+
+## Limitations / what autonod is not
+
+- It is an **automation tool, not an unattended system**. Even with the safety guards, leave it running only while you can occasionally glance at the terminal.
+- It cannot type free-form answers — questions that need typed input always return `none`.
+- It does not push keys to anything outside tmux. If your Claude session is in a plain terminal window, run it under tmux first.
+- The cooldown is per-prompt-hash, not per-pane. If two panes show the same prompt in the same 15-second window, only one will be acted on first.
+
+## License
+
+MIT.

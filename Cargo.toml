@@ -1,0 +1,38 @@
+[package]
+name = "autonod"
+version = "0.2.0-alpha.1"
+edition = "2021"
+description = "tmux pane monitoring daemon that auto-responds to Claude Code permission prompts"
+license = "MIT"
+rust-version = "1.82"
+
+[[bin]]
+name = "autonod"
+path = "src/main.rs"
+
+[lib]
+name = "autonod"
+path = "src/lib.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "process", "signal", "sync", "time"] }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+regex = "1"
+anyhow = "1"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+sha1 = "0.10"
+hex = "0.4"
+
+[dev-dependencies]
+pretty_assertions = "1"
+tokio = { version = "1", features = ["test-util"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
